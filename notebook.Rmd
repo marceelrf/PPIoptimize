@@ -1,0 +1,182 @@
+---
+title: 'Notebook - '
+author: "Marcel Ferreira @marceelrf"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Packages
+
+```{r,echo=FALSE}
+library(tidyverse)
+library(readxl)
+library(glue)
+library(STRINGdb)
+library(igraph)
+library(corrr)
+library(extrafont)
+library(viridis)
+```
+
+
+## Import data
+
+```{r}
+data <- read_xlsx(path = here::here("data/data.xlsx"))
+glimpse(data)
+```
+
+## Correlation network
+
+```{r}
+corr_tbl <- data %>% 
+  #tidy the data
+  mutate(Groups = glue("{Group}_{Time}")) %>% 
+  select(-Time, - Group) %>% 
+  mutate(n = rep(1:3,4*26)) %>% 
+  #mutate(n = row_number()) %>% 
+  pivot_wider(names_from = "Gene",values_from = "Expr") %>% 
+  mutate(Groups = glue("{Groups}_{n}")) %>% 
+  select(-n) %>% 
+  column_to_rownames(var = "Groups") %>%
+  #compute correlation
+  correlate(diagonal = 0,method = "pearson")
+```
+
+```{r}
+#function to get adjacent matrix
+getAdjMatrix <- function(df, cor_min = .8){
+  a <- corr_tbl %>% 
+  column_to_rownames("term") %>% 
+  as.matrix()
+  
+  a[is.na(a)] <- 0
+  
+  a[a < cor_min & a > -cor_min] <- 0
+  a[a >= cor_min | a <= -cor_min] <- 1
+  
+  return(a)
+}
+
+
+adjMat <- getAdjMatrix(corr_tbl,cor_min = .8)
+```
+
+```{r}
+corrNet <- igraph::graph_from_adjacency_matrix(adjMat,mode = "undirected")
+
+
+plot(corrNet,layout =  layout_with_fr(corrNet))
+```
+
+
+## STRING-db
+
+```{r}
+string_db <- STRINGdb$new(version="11",
+                          species=9606,
+                          score_threshold = 500,
+                          input_directory="")
+
+#Prepare the data - Need to be a data.frame with unique Gene symbols
+GENES <- data %>% 
+  select(Gene) %>% 
+  distinct() %>% 
+  as.data.frame()
+
+#Mapping genes in STRING database
+mapped_genes <- string_db$map(my_data_frame = GENES,
+                              my_data_frame_id_col_names = "Gene",
+                              removeUnmappedRows = TRUE)
+
+#Get the protein-protein interactions
+PPI_500 <- string_db$get_interactions(mapped_genes$STRING_id)
+```
+
+## Optimization  
+
+```{r}
+#PPI in symbols
+PPI_symbols <- PPI_500 %>% 
+  left_join(mapped_genes, by = c("from" = "STRING_id")) %>% 
+  left_join(mapped_genes, by = c("to" = "STRING_id")) %>% 
+  select(-from,-to) %>% 
+  rename("From" = "Gene.x","To" = "Gene.y") %>% 
+  distinct() %>% 
+  select(From,To,combined_score)
+```
+
+```{r}
+#Jaccard edge function
+jaccard_Edge <- function(g1,g2){
+  eA <- as_edgelist(g1)
+  eB <- as_edgelist(g2)
+  
+  eA <- eA %>%
+    as_tibble() %>%
+    mutate(EDGE = paste(V1,V2,sep = "_"))
+  
+  eB <- eB %>%
+    as_tibble() %>%
+    mutate(EDGE = paste(V1,V2,sep = "_"))
+  
+  
+  jE <- length(intersect(eA$EDGE,eB$EDGE))/length(union(eA$EDGE,eB$EDGE))
+  return(jE)
+}
+```
+
+```{r}
+#The scores to operate on
+corr_vec <- seq(from = .5, to = .9, by = .005)
+ppiscore <- seq(from = 500, to = 900, by = 5)
+```
+
+```{r}
+#create an empty list
+Jc_list <- list()
+
+for(i in 1:length(ppiscore)){
+  
+  #create a PPI filtered by PPIscore min
+  PPI_graph <- PPI_symbols %>%
+    filter(combined_score >= ppiscore[i]) %>%
+    igraph::graph_from_data_frame(directed = FALSE)
+  
+  #Iterate of corr_vec
+  for(j in 1:length(corr_vec)){
+    
+    Exp_graph <- getAdjMatrix(corr_tbl,cor_min = corr_vec[j]) %>% 
+      igraph::graph_from_adjacency_matrix(mode = "undirected")
+    
+    Jc_val <- 
+    
+    Jc_list <- append(Jc_list, jaccard_Edge(PPI_graph,Exp_graph))
+    
+
+  }
+
+}
+
+```
+
+```{r}
+tidyr::crossing(ppiscore,corr_vec) %>% 
+  mutate(Jarccard_index = unlist(Jc_list)) %>% 
+  ggplot(aes(x = ppiscore, y = corr_vec, fill = Jarccard_index)) +
+  geom_raster(interpolate = T) +
+  viridis::scale_fill_viridis(option =  "A") +
+  theme_bw() +
+  labs(x = "STRINGdb PPI score",
+       y = "Pearson's correlation",
+       fill = "Jaccard index",
+       title = "PPI score vs correlation") +
+  scale_x_continuous(minor_breaks = ppiscore, expand = c(0, 0)) +
+  scale_y_continuous(minor_breaks = corr_vec, expand = c(0, 0)) +
+  theme(text = element_text(family = "Perpetua"),
+        axis.title = element_text(face = "bold"),
+        plot.title = element_text(face = "bold",size = 20)
+        )
+```
+
