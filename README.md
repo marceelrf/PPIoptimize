@@ -10,4 +10,4 @@
 
 The goal of **PPIoptimize** is to create a pipeline to optmize
 correlation network analysis based on Protein-Protein Interaction
-databases.
+databases. Keep up to date with `notebook.Rmd` file.
